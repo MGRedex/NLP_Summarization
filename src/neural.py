@@ -561,45 +561,61 @@ class LightningTransformer(L.LightningModule):
         return optimizer
 
 class Trainer():
-    def __init__(self, model, optimizer, loss_fn, scheduler, config, tokenizer):
+    def __init__(
+            self,
+            model,
+            optimizer,
+            loss_fn,
+            scheduler,
+            tokenizer,
+            epoch,
+            device = "cpu",
+            checkpoint_path = None,
+            checkpoint_by = None,
+            non_blocking = False,
+            warmup = False,
+            max_src_len = 0,
+            max_tgt_len = 0,
+            batch_size = 32,
+    ):
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.scheduler = scheduler
-
         self.tokenizer = tokenizer
 
-        self.configurate(config)
-    
-    def configurate(self, config):
-        self.config = config
-        self.device = config["DEVICE"]
-        self.checkpoint_by = config["TRAINING"].get("CHECKPOINT_BY")
+        self.epoch = epoch
+        self.device = device
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_by = checkpoint_by
         if self.checkpoint_by:
             self.__setattr__(self.checkpoint_by, 0)
-        self.checkpoint_path = config["TRAINING"].get("CHECKPOINT_PATH")
-        torch.backends.cuda.matmul.allow_tf32 = config["MODEL"]["TF32"]
+        self.non_blocking = non_blocking
+        self.warmup = warmup
+        self.max_src_len = max_src_len
+        self.max_tgt_len = max_tgt_len
+        self.batch_size = batch_size
+    
 
-    def train(self, train_dataloader, validation_dataloader = None, validation_rate = 1, model_metrics = None, writer = None):
-        if self.config["MODEL"]["WARMUP"]:
-            self.model.train()
-            max_doc_len = 191
-            max_sum_len = 80
+    def train(
+            self,
+            train_dataloader,
+            validation_dataloader = None,
+            validation_rate = 1,
+            model_metrics = None,
+            writer = None
+    ):
+        self._warmup()
 
-            X = torch.rand(self.config["DATA"]["BATCH_SIZE"],max_doc_len).type(torch.LongTensor).to(self.device)
-            y = torch.rand(self.config["DATA"]["BATCH_SIZE"],max_sum_len).type(torch.LongTensor).to(self.device)
-            summary_with_eos = torch.rand(self.config["DATA"]["BATCH_SIZE"],max_sum_len,1).type(torch.LongTensor).to(self.device)
-
-            y_pred = self.model(X, y)
-            loss = self.loss_fn(y_pred.view(-1, y_pred.shape[2]), summary_with_eos.view(-1))
-            loss.backward()
-
-            self.optimizer.zero_grad()
-
-        print(f'model: {self.model.__class__.__name__}, epochs: {self.config["TRAINING"]["EPOCH"]}, batch size: {self.config["DATA"]["BATCH_SIZE"]}, train dataset len: {len(train_dataloader) * self.config["DATA"]["BATCH_SIZE"]} inst.')
+        print(
+            f'model: {self.model.__class__.__name__}, '
+            f'epochs: {self.epoch}, '
+            f'batch size: {self.batch_size}, '
+            f'train dataset len: {len(train_dataloader) * self.batch_size} inst.'
+        )
     
         with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=False, enable_mem_efficient=True):
-            for epoch in range(1, self.config["TRAINING"]["EPOCH"] + 1):
+            for epoch in range(1, self.epoch + 1):
                 print(f"epoch: {epoch}")
                 ov_loss = 0
 
@@ -640,16 +656,30 @@ class Trainer():
                         metric.reset()
 
     def _train_step(self, batch):
-        x, y = batch["document"].to(self.device, non_blocking = self.config["DATA"]["NON_BLOCKING"]), batch["summary"].to(self.device, non_blocking = self.config["DATA"]["NON_BLOCKING"])
+        x, y = batch["document"].to(self.device, non_blocking = self.non_blocking), batch["summary"].to(self.device, non_blocking = self.non_blocking)
 
         y_pred = self.model(x, y)
 
         summary_with_eos = F.pad(y[:, 1:], pad = (0,1), value = 0)
-        summary_with_eos[torch.arange(self.config["DATA"]["BATCH_SIZE"], device = self.device), summary_with_eos.argmin(dim = 1)] = self.tokenizer.eos_token_id
+        summary_with_eos[torch.arange(self.batch_size, device = self.device), summary_with_eos.argmin(dim = 1)] = self.tokenizer.eos_token_id
 
         loss = self.loss_fn(y_pred.view(-1, y_pred.shape[2]), summary_with_eos.view(-1))
 
         return loss
+
+    def _warmup(self):
+        if self.warmup:
+            self.model.train()
+
+            X = torch.rand(self.batch_size, self.max_src_len).type(torch.LongTensor).to(self.device)
+            y = torch.rand(self.batch_size, self.max_tgt_len).type(torch.LongTensor).to(self.device)
+            summary_with_eos = torch.rand(self.batch_size, self.max_tgt_len,1).type(torch.LongTensor).to(self.device)
+
+            y_pred = self.model(X, y)
+            loss = self.loss_fn(y_pred.view(-1, y_pred.shape[2]), summary_with_eos.view(-1))
+            loss.backward()
+
+            self.optimizer.zero_grad()
 
     def validate(self, validation_dataloader, model_metrics):
         self.model.eval(autoregressive = False)
