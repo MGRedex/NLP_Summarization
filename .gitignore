@@ -1,0 +1,6 @@
+**/logs
+**/__pycache__
+**/checkpoints
+**/submission*.csv
+**/.pytest_cache
+train_states
