@@ -577,7 +577,13 @@ class Trainer():
             max_src_len = 0,
             max_tgt_len = 0,
             batch_size = 32,
+            model_metrics = None,
     ):
+        try:
+            model_metrics[checkpoint_by]
+        except:
+            raise(KeyError("checkpoint_by metric name not found in model_metrics"))
+
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
@@ -588,25 +594,29 @@ class Trainer():
         self.device = device
         self.checkpoint_path = checkpoint_path
         self.checkpoint_by = checkpoint_by
-        if self.checkpoint_by:
-            self.__setattr__(self.checkpoint_by, 0)
         self.non_blocking = non_blocking
         self.warmup = warmup
         self.max_src_len = max_src_len
         self.max_tgt_len = max_tgt_len
         self.batch_size = batch_size
-    
+        self.model_metrics = model_metrics
 
     def train(
             self,
             train_dataloader,
             validation_dataloader = None,
             validation_rate = 1,
-            model_metrics = None,
             writer = None
     ):
-        self._warmup()
+        if self.warmup:
+            self._warmup()
 
+        if self.checkpoint_by and self.model_metrics:
+            old_checkpoint_metric_value = self.model_metrics[self.checkpoint_by].compute()
+
+        # TODO:
+        # Add more info, may be change model name
+        # from class name to instance name
         print(
             f'model: {self.model.__class__.__name__}, '
             f'epochs: {self.epoch}, '
@@ -631,29 +641,27 @@ class Trainer():
                     
                 self.scheduler.step()
                 ov_loss = ov_loss / len(train_dataloader)
+
                 print(f"overall loss: {ov_loss}")
 
                 if writer:
                     writer.add_scalar(f"{self.__class__.__name__}_loss", ov_loss.type(torch.float), epoch)
 
-                if validation_dataloader and model_metrics and epoch % validation_rate == 0:
-                    self.validate(validation_dataloader, model_metrics)
+                if validation_dataloader and self.model_metrics and epoch % validation_rate == 0:
+                    for name, metric in self.model_metrics.items():
+                        metric.reset()
+
+                    self.validate(validation_dataloader, self.model_metrics)
 
                     if self.checkpoint_by:
-                        new_val = model_metrics[self.checkpoint_by].compute()
-                        if self.__getattribute__(self.checkpoint_by) < new_val:
-                            self.__setattr__(self.checkpoint_by, new_val)
-                            torch.save({
-                                "model_state": self.model.state_dict(),
-                                "optimizer_state": self.optimizer.state_dict(),
-                                "scheduler_state": self.scheduler.state_dict(),
-                                "checkpoint_by": {self.checkpoint_by: self.__getattribute__(self.checkpoint_by)}
-                            }, self.checkpoint_path)
+                        new_checkpoint_metric_value = self.model_metrics[self.checkpoint_by].compute()
+                        if old_checkpoint_metric_value < new_checkpoint_metric_value:
+                            old_checkpoint_metric_value = new_checkpoint_metric_value
+                            self.save_state_dict(self.checkpoint_path)
 
-                    for name, metric in model_metrics.items():
-                        if writer:
+                    if writer:
+                        for name, metric in self.model_metrics.items():
                             writer.add_scalar(f"{self.__class__.__name__}_{name}", metric.compute(), epoch)
-                        metric.reset()
 
     def _train_step(self, batch):
         x, y = batch["document"].to(self.device, non_blocking = self.non_blocking), batch["summary"].to(self.device, non_blocking = self.non_blocking)
@@ -668,18 +676,17 @@ class Trainer():
         return loss
 
     def _warmup(self):
-        if self.warmup:
-            self.model.train()
+        self.model.train()
 
-            X = torch.rand(self.batch_size, self.max_src_len).type(torch.LongTensor).to(self.device)
-            y = torch.rand(self.batch_size, self.max_tgt_len).type(torch.LongTensor).to(self.device)
-            summary_with_eos = torch.rand(self.batch_size, self.max_tgt_len,1).type(torch.LongTensor).to(self.device)
+        X = torch.rand(self.batch_size, self.max_src_len).type(torch.LongTensor).to(self.device)
+        y = torch.rand(self.batch_size, self.max_tgt_len).type(torch.LongTensor).to(self.device)
+        summary_with_eos = torch.rand(self.batch_size, self.max_tgt_len,1).type(torch.LongTensor).to(self.device)
 
-            y_pred = self.model(X, y)
-            loss = self.loss_fn(y_pred.view(-1, y_pred.shape[2]), summary_with_eos.view(-1))
-            loss.backward()
+        y_pred = self.model(X, y)
+        loss = self.loss_fn(y_pred.view(-1, y_pred.shape[2]), summary_with_eos.view(-1))
+        loss.backward()
 
-            self.optimizer.zero_grad()
+        self.optimizer.zero_grad()
 
     def validate(self, validation_dataloader, model_metrics):
         self.model.eval(autoregressive = False)
@@ -687,16 +694,28 @@ class Trainer():
             for batch, data in enumerate(tqdm(validation_dataloader)):
                 with torch.autocast(device_type = self.device):
                     preds = self.model(data["document"].to(self.device), data["document"].to(self.device)).argmax(-1)
+
                 preds = self.tokenizer.batch_decode(preds, skip_special_tokens = True)
+
                 for metric in model_metrics.values():
                     metric.update(preds, self.tokenizer.batch_decode(data["summary"], skip_special_tokens = True))
+
             for name, metric in model_metrics.items():
                 print(f'{name}: {metric.compute()}')
+
+    def save_state_dict(self, path):
+        torch.save({
+            "model_state": self.model.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict(),
+            "model_metrics": {name: metric.state_dict() for name, metric in self.model_metrics.items()}
+        }, path)
 
     def load_state_dict(self, state_dict):
         self.model.load_state_dict(state_dict["model_state"])
         self.optimizer.load_state_dict(state_dict["optimizer_state"])
         self.scheduler.load_state_dict(state_dict["scheduler_state"])
-        for name, value in state_dict["checkpoint_by"].items():
-            self.checkpoint_by = name
-            self.__setattr__(self.checkpoint_by, value)
+
+        if self.model_metrics:
+            for name in self.model_metrics.keys():
+                self.model_metrics[name].load_state_dict(state_dict["model_metrics"][name])
