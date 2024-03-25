@@ -561,6 +561,8 @@ class LightningTransformer(L.LightningModule):
         return optimizer
 
 class Trainer():
+    """Class for training sequential models"""
+
     def __init__(
             self,
             model,
@@ -579,6 +581,26 @@ class Trainer():
             batch_size = 32,
             model_metrics = None,
     ):
+        """Initializes trainer
+        
+        Args:
+            model: model to train.
+            optimizer: optimizer that do gradient descent.
+            loss_fn: function that calculates loss and backward.
+            scheduler: scheduler for optimizer.
+            tokenizer: tokenizer that was used for data tokenization.
+            epoch: number of epochs for training.
+            device: device on which model and datasets are stored.
+            checkpoint_path: path where to save state_dict.
+            checkpoint_by: metric name by which checkpoint will occur.
+            non_blocking: whether datasets transfered to gpu asynchronously.
+            warmup: if train data batch sizes are different, saves memory by preallocating memory
+            for tensors with biggest possible batch sizes.
+            max_src_len: max len of src sequences for warmup.
+            max_tgt_len: max len of tgt sequences for warmup.
+            batch_size: size of dataset batch.
+            model_metrics: dict with model metrics.
+        """
         try:
             model_metrics[checkpoint_by]
         except:
@@ -608,6 +630,21 @@ class Trainer():
             validation_rate = 1,
             writer = None
     ):
+        """Trains model. One epoch iteration:
+            - Go through whole train dataloader, doing backpropagation on each batch.
+            - Do scheduler step.
+            - Write overall loss to tensorboard (if writer provided).
+            - Do validation (if needed):
+            -- Reset metrics.
+            -- Validate data.
+            -- Checkpoint (if needed).
+            -- Write metrics to tensorboard (if writer provided).
+        
+        Args:
+            train_dataloader: pytorch dataloader for train data.
+            validation_dataloader: pytorch dataloader for validation data.
+            writer: pytorch tensorboard writer.
+        """
         if self.warmup:
             self._warmup()
 
@@ -664,6 +701,14 @@ class Trainer():
                             writer.add_scalar(f"{self.__class__.__name__}_{name}", metric.compute(), epoch)
 
     def _train_step(self, batch):
+        """One training step.
+
+        Args:
+            batch: train dataloader batch.
+
+        Returns:
+            loss tensor.
+        """
         x, y = batch["document"].to(self.device, non_blocking = self.non_blocking), batch["summary"].to(self.device, non_blocking = self.non_blocking)
 
         y_pred = self.model(x, y)
@@ -676,6 +721,12 @@ class Trainer():
         return loss
 
     def _warmup(self):
+        """Saves memory if train data batches have different sizes:
+        - Allocates tensors with biggest possible size.
+        - Makes predictions using those tensors.
+        - Computes loss and does backward.
+        - Zeroes gradients without making step.
+        """
         self.model.train()
 
         X = torch.rand(self.batch_size, self.max_src_len).type(torch.LongTensor).to(self.device)
@@ -689,6 +740,8 @@ class Trainer():
         self.optimizer.zero_grad()
 
     def validate(self, validation_dataloader, model_metrics):
+        """Validates model, updates and prints metrics.
+        """
         self.model.eval(autoregressive = False)
         with torch.inference_mode():
             for batch, data in enumerate(tqdm(validation_dataloader)):
@@ -704,6 +757,12 @@ class Trainer():
                 print(f'{name}: {metric.compute()}')
 
     def save_state_dict(self, path):
+        """Saves state_dicts of model, optimizer, scheduler and model_metrics 
+        to pytorch file.
+        
+        Args:
+            path: path where to save state_dict, with file extension whether pt or pth (best practice).
+        """
         torch.save({
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
@@ -712,6 +771,11 @@ class Trainer():
         }, path)
 
     def load_state_dict(self, state_dict):
+        """Loads state_dicts of model, optimizer, scheduler and model_metrics.
+
+        Args:
+            state_dict: loaded by pytorch state_dict.
+        """
         self.model.load_state_dict(state_dict["model_state"])
         self.optimizer.load_state_dict(state_dict["optimizer_state"])
         self.scheduler.load_state_dict(state_dict["scheduler_state"])
