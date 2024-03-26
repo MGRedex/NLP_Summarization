@@ -1,34 +1,51 @@
-from typing import Any
-import torch
-from copy import deepcopy
-import torch.nn.functional as F
-from torch import nn
-from torch import Tensor
-from torch.optim import Adam
-from transformers import AutoTokenizer
 import math
-from tqdm import tqdm
-from typing import (
-    Optional,
-    Dict 
-)
 import lightning as L
-from matplotlib import pyplot as plt
 import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import (
+    nn,
+    Tensor,
+)
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import LRScheduler
+from torch.optim import Adam, Optimizer
+from torcheval.metrics import Metric
+from transformers import AutoTokenizer
+from tqdm import tqdm
+from copy import deepcopy
+from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
+from typing import (
+    Any,
+    Optional,
+    Dict,
+)
 
 class PositionalEncoding(nn.Module):
+    """Layer that adds positional embeddings to embeddings."""
     def __init__(
             self,
             emb_dim: int,
             seq_len: int,
             dropout: float,
-            dtype = None,
+            dtype: type = None,
     ) -> None:
+        """Initializes layer.
+        
+        Args:
+            emb_dim: embedding size.
+            seq_len: sequence length.
+            dropout: layer dropout rate.
+            dtype: dtype of positional embeddings.
+        """
         super().__init__()
+
         self.emb_dim = emb_dim
         self.seq_len = seq_len
         self.dropout = nn.Dropout(dropout)
+
         pe = torch.zeros(seq_len, emb_dim)
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, emb_dim, 2).float() * (-math.log(10000.0) / emb_dim))
@@ -39,17 +56,33 @@ class PositionalEncoding(nn.Module):
             pe = pe.type(dtype)
         self.register_buffer('pe', pe)
 
-    def forward(self, x):
+    def forward(
+            self,
+            x: Tensor,
+    ):
+        """Adds positional embeddins."""
         x = x + (self.pe[:, :x.shape[1], :])
         return self.dropout(x)
 
 # https://github.com/alex-matton/causal-transformer-decoder
 class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     def __init__(self, *args, **kwargs):
+        """Initializes layer."""
         self.autoregressive_inf = False
         super().__init__(*args, **kwargs)
 
-    def eval(self, autoregressive = False):
+    def eval(
+            self,
+            autoregressive: bool = False,
+    ):
+        """Sets layer to eval mode.
+        
+        Args:
+            autoregressive: if set uses autoregressive validation.
+
+        Returns:
+            self.
+        """
         self.autoregressive_inf = autoregressive
         return self.train(False)
 
@@ -64,11 +97,12 @@ class CausalTransformerDecoderLayer(nn.TransformerDecoderLayer):
     ) -> Tensor:
         """
         Args:
-            see CausalTransformerDecoder
+            see CausalTransformerDecoder.
+
         Returns:
             Tensor:
-                If training: embedding of the whole layer: seq_len x bsz x hidden_dim
-                If eval mode: embedding of last token: 1 x bsz x hidden_dim
+                If training: embedding of the whole layer: seq_len x bsz x hidden_dim.
+                If eval mode: embedding of last token: 1 x bsz x hidden_dim.
         """
 
         if self.training or (not self.training and not self.autoregressive_inf):
@@ -134,10 +168,22 @@ class CausalTransformerDecoder(nn.TransformerDecoder):
     masks are handled for you).
     """
     def __init__(self, *args, **kwargs):
+        """Initializes layer."""
         self.autoregressive_inf = False
         super().__init__(*args, **kwargs)
 
-    def eval(self, autoregressive = False):
+    def eval(
+            self,
+            autoregressive = False,
+    ):
+        """Sets layer and all decoders to eval mode.
+        
+        Args:
+            autoregressive: if set uses autoregressive validation.
+
+        Returns:
+            self.
+        """
         self.autoregressive_inf = autoregressive
         for module in self.modules():
             if isinstance(module, CausalTransformerDecoderLayer):
@@ -163,6 +209,7 @@ class CausalTransformerDecoder(nn.TransformerDecoder):
                 If current_len_output == 1, nothing is cached yet, so cache
                 should be None. Same if the module is in training mode.
             others (Optional[Tensor]): see official documentations
+
         Returns:
             output (Tensor): current_len_output x bsz x hidden_dim
             cache (Optional[Tensor]): n_layers x current_len_output x bsz x hidden_dim
@@ -214,7 +261,7 @@ class CausalTransformerDecoder(nn.TransformerDecoder):
             new_cache = torch.stack(new_token_cache, dim=0)
 
         # output = last_decoder_cached_state + new token embedding
-        # so we could it provide to first decoder in the next iteration
+        # so we could provide it to first decoder in the next iteration
         # but we add last transformed(to token index) embeddings to targets outside the decoder stack
         # so we need only last token
         return output[:, -1:, :], new_cache
@@ -227,12 +274,27 @@ class Transformer(nn.Module):
             emb_dim: int,
             n_heads: int,
             feedforward_dim: int,
-            dropouts: Dict[str,float],
+            dropouts: Dict[str, float],
             dtype = None,
             activation = nn.LeakyReLU(),
             dec_num = 3,
             enc_num = 3,
     ):
+        """Initializes layer.
+        
+        Args:
+            vocab_size: amount of unique tokens.
+            seq_len: sequence length.
+            emb_dim: embedding size.
+            n_heads: number of attention heads.
+            feedforward_dim: size of feedforward layer.
+            dropouts: dict with dropouts for positional encoding, encoder and decoder
+            for example  {'POS_EMB': 0.1, 'ENCODER': 0.1, 'DECODER': 0.1,}
+            dtype: dtype of tensors.
+            activation: activation callable.
+            dec_num: number of decoders.
+            enc_num: number of encoders.
+        """
         super().__init__()
 
         # Layers
@@ -295,6 +357,14 @@ class Transformer(nn.Module):
         )
         
     def eval(self, autoregressive = False):
+        """Sets layer to eval mode.
+        
+        Args:
+            autoregressive: if set uses autoregressive validation.
+
+        Returns:
+            self.
+        """
         self.autoregressive_inf = autoregressive
         self.decoder_stack.eval(autoregressive)
         return self.train(False)
@@ -306,7 +376,19 @@ class Transformer(nn.Module):
             pad_token: int = 0,
             eos_token: int = 30522,
             bos_token: int = 30523,
-    ):    
+    ) -> Tensor:
+        """Predicts output sequence.
+        
+        Args:
+            src: source sequence.
+            tgt: optional target sequence (used for training).
+            pad_token: token used for padding.
+            eos_token: token used as end of sequence.
+            bos_token: token used as beginning of sequence.
+
+        Returns:
+            tensor with predicted sequences.
+        """
         # Compute padding masks
         src_pad_mask = (src == pad_token)
 
@@ -562,24 +644,23 @@ class LightningTransformer(L.LightningModule):
 
 class Trainer():
     """Class for training sequential models"""
-
     def __init__(
             self,
-            model,
-            optimizer,
-            loss_fn,
-            scheduler,
-            tokenizer,
-            epoch,
-            device = "cpu",
-            checkpoint_path = None,
-            checkpoint_by = None,
-            non_blocking = False,
-            warmup = False,
-            max_src_len = 0,
-            max_tgt_len = 0,
-            batch_size = 32,
-            model_metrics = None,
+            model: nn.Module,
+            optimizer: Optimizer,
+            loss_fn: nn.Module,
+            scheduler: LRScheduler,
+            tokenizer: AutoTokenizer,
+            epoch: int,
+            device: str = "cpu",
+            checkpoint_path: str = None,
+            checkpoint_by: str = None,
+            non_blocking: bool = False,
+            warmup: bool = False,
+            max_src_len: int = 0,
+            max_tgt_len: int = 0,
+            batch_size: int = 32,
+            model_metrics: Dict[str, Metric] = None,
     ):
         """Initializes trainer
         
@@ -625,10 +706,10 @@ class Trainer():
 
     def train(
             self,
-            train_dataloader,
-            validation_dataloader = None,
-            validation_rate = 1,
-            writer = None
+            train_dataloader: DataLoader,
+            validation_dataloader: DataLoader = None,
+            validation_rate: int = 1,
+            writer: SummaryWriter = None,
     ):
         """Trains model. One epoch iteration:
             - Go through whole train dataloader, doing backpropagation on each batch.
@@ -700,7 +781,10 @@ class Trainer():
                         for name, metric in self.model_metrics.items():
                             writer.add_scalar(f"{self.__class__.__name__}_{name}", metric.compute(), epoch)
 
-    def _train_step(self, batch):
+    def _train_step(
+            self,
+            batch: Dict[str, Tensor],
+    ) -> nn.Module:
         """One training step.
 
         Args:
@@ -739,7 +823,11 @@ class Trainer():
 
         self.optimizer.zero_grad()
 
-    def validate(self, validation_dataloader, model_metrics):
+    def validate(
+            self,
+            validation_dataloader: DataLoader,
+            model_metrics: Dict[str, Metric],
+    ):
         """Validates model, updates and prints metrics.
         """
         self.model.eval(autoregressive = False)
@@ -756,7 +844,10 @@ class Trainer():
             for name, metric in model_metrics.items():
                 print(f'{name}: {metric.compute()}')
 
-    def save_state_dict(self, path):
+    def save_state_dict(
+            self,
+            path: str,
+    ):
         """Saves state_dicts of model, optimizer, scheduler and model_metrics 
         to pytorch file.
         
@@ -770,7 +861,10 @@ class Trainer():
             "model_metrics": {name: metric.state_dict() for name, metric in self.model_metrics.items()}
         }, path)
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(
+            self,
+            state_dict: Dict[str, Dict],
+    ):
         """Loads state_dicts of model, optimizer, scheduler and model_metrics.
 
         Args:
