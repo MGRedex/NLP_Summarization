@@ -834,7 +834,7 @@ class Trainer():
         with torch.inference_mode():
             for batch, data in enumerate(tqdm(validation_dataloader)):
                 with torch.autocast(device_type = self.device):
-                    preds = self.model(data["document"].to(self.device), data["document"].to(self.device)).argmax(-1)
+                    preds = self.model(data["document"].to(self.device, non_blocking = self.non_blocking), data["summary"].to(self.device, non_blocking = self.non_blocking)).argmax(-1)
 
                 preds = self.tokenizer.batch_decode(preds, skip_special_tokens = True)
 
