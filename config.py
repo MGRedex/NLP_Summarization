@@ -27,7 +27,7 @@ config = {
         "EPOCH": 10,
         "LOGS_FOLDER": "./logs",
         "CHECKPOINT_BY": "BLEU",
-        "CHECKPOINT_PATH":"./train_states/best_state_5dec.pt", 
+        "CHECKPOINT_PATH":"./train_states/best_state_6dec.pt", 
     },
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
 }
