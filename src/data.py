@@ -7,6 +7,7 @@ from torch.utils.data import (
 import datasets
 from transformers import AutoTokenizer
 import pyarrow.compute as pc
+from typing import List, Dict
 
 class DataTransformer(): 
     """Class that uses a pretrained tokenizer
@@ -18,9 +19,15 @@ class DataTransformer():
     (possible but on each call, so it slows down iterations)."""
     def __init__(
             self,
-            tokenize = False,
-            pad = False,
+            tokenize: bool = False,
+            pad: bool = False,
     ):
+        """Initializes data transformer.
+        
+        Args:
+            tokenize: whether tokenize sequence.
+            pad: whether pad sequence.
+        """
         # Tokenize, pad flags
         self.tokenize = tokenize
         self.pad = pad
@@ -32,10 +39,24 @@ class DataTransformer():
         })
         self.tokenizer = bert_tokenizer
 
-    def __call__(self, row):
+    def __call__(
+            self,
+            row: Dict[str, List[str|List[int]]],
+    ) -> Dict[str, List[List[int]]]:
+        """Transforms data.
+        
+        Args:
+            row: dict which keys are whether lists of strings
+            or lists of lists of ints(in case of already tokenized sequences).
+
+        Returns:
+            dict of transformed data, in both
+            tokenization and padding cases with lists of lists of ints.
+        """
         new_doc = row["document"]
         new_sum = row["summary"]
 
+        # Tokenize sequences
         if self.tokenize:
             new_doc = self.tokenizer(
                 [f"{doc}[EOS]" for doc in new_doc],
@@ -52,6 +73,7 @@ class DataTransformer():
                 add_special_tokens = False
             )["input_ids"]
 
+        # Pad tokenized sequences
         if self.pad:
             # doc_pad_len = len(new_doc[-1])
             # sum_pad_len = max(row["summary_len"])
